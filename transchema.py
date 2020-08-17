@@ -6,13 +6,17 @@ class PGDBInterface:
     
     def __init__(self, database, user, password, host, port, sslmode=None):
 
-
-        # Connect & ensures commits ASAP, not waiting for transactions
-        self.conn            = None
-        self.conn.autocommit = True
+        # Connect 
+        self.conn = None
 
         # Attempt connection to database
         self.create_db_connection(database, user, password, host, port, sslmode)
+
+        # Ensures commits ASAP, not waiting for transactions
+        self.conn.autocommit = True
+
+        # Creates tables, from which the DB will be read/created
+        self.tables = {}
         
 
     def create_db_connection(self, database, user, password, host, port, sslmode=None):
@@ -47,7 +51,7 @@ class PGDBInterface:
         
 class PGSchemaReader(PGDBInterface):
             
-    def get_tables(self):
+    def get_database_schema(self):
 
         """
         PostgreSQL reader, prints & returns the tables
@@ -56,7 +60,7 @@ class PGSchemaReader(PGDBInterface):
         cursor = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
         cursor.execute("""
-        SELECT table_schema, table_name
+        SELECT table_schema, table_name, table_type
         FROM information_schema.tables
         WHERE table_schema != 'pg_catalog'
         AND table_schema != 'information_schema'
@@ -66,14 +70,62 @@ class PGSchemaReader(PGDBInterface):
 
         tables = cursor.fetchall()
 
-        cursor.close()
-        
-        for row in tables:
+        # Obtain columns for each table
+        for table in tables:
             
-            print("{}.{}".format(row["table_schema"], row["table_name"]))
+            where_dict = {
+                "table_schema": table['table_schema'],
+                "table_name": table['table_name']
+            }
+            
+            cursor.execute("""
+            SELECT column_name, ordinal_position, 
+            is_nullable, data_type, character_maximum_length
+            FROM information_schema.columns
+            WHERE table_schema = %(table_schema)s
+            AND table_name   = %(table_name)s
+            ORDER BY ordinal_position
+            """, where_dict)
+            
+            table['columns'] = cursor.fetchall()
+            
+        cursor.close()
 
-        return tables
+        self.tables = tables        
+        
+        return self.tables
 
+
+    def print_database(self):
+        for table in self.tables:
+            max_col_widths = {
+                "column_name":0, "data_type":0,
+                "is_nullable":0, "character_maximum_length":0
+        
+            }
+            for column in table["columns"]:
+                for key in max_col_widths.keys():
+                    if not column[key]:
+                        column[key] = ""
+                        
+                    if len(column[key]) > max_col_widths[key]:
+                        max_col_widths[key] = len(column[key])
+
+            max_width = 0
+            for key in max_col_widths.keys():
+                max_width += max_col_widths[key]
+
+            print("\n{} | {} | {}".format(
+                table["table_schema"], table["table_name"], table["table_type"]
+            ))
+            print("-"*(max_width+6))
+            for column in table["columns"]:
+                s  = f'{column["column_name"]: <{max_col_widths["column_name"]}} |'
+                s += f'{column["data_type"]: <{max_col_widths["data_type"]}} |'
+                s += f'{column["is_nullable"]: <{max_col_widths["is_nullable"]}} |'
+                s += f'{column["character_maximum_length"]: <{max_col_widths["character_maximum_length"]}}'
+                print(s)
+    
 
 def main(argv):
 
@@ -98,7 +150,9 @@ def main(argv):
         sslmode=params["sslmode"]
     )
     
-    tables = pgreader.get_tables()
+    pgreader.get_database_schema()
+
+    pgreader.print_database()
 
     pgreader.conn.close()
 
